@@ -1304,52 +1304,138 @@ def load_jsonl_samples(jsonl_path: str) -> list[dict]:
         logger.exception(f"Failed to load jsonl {jsonl_path}")
     return samples
 
-def build_pyg_dataset_from_jsonl(jsonl_path: str) -> "Optional[list[PyGData]]":
+def build_pyg_dataset_from_jsonl(
+    jsonl_path: str,
+    elements_json_path: str = r"C:\Users\andre\Downloads\ElementsProject\data\elements.json"
+) -> "Optional[list[PyGData]]":
     """
-    Converts a JSONL exported by ReactionKnowledgeBaseV2.export_ml_dataset into a list of PyG Data objects.
-    If PyG/Torch are not available, returns None.
+    Converts a JSONL exported by ReactionKnowledgeBaseV2.export_ml_dataset
+    into a list of PyG Data objects suitable for GNN training.
+
+    Node features now include a comprehensive set of chemical properties from elements.json:
+        - atomic_mass, electronegativity, charge, electron_affinity
+        - density, molar_heat, period, group
+        - block (s/p/d/f encoded), phase (gas/liquid/solid encoded)
+        - number of shells, first N ionization energies
+        - x/y position, bias term
+    Missing values are replaced with sensible defaults (0.0).
+
+    Args:
+        jsonl_path (str): Path to the JSONL file containing the dataset.
+        elements_json_path (str): Path to elements.json containing atomic data.
+
+    Returns:
+        Optional[list[PyGData]]: List of PyG Data objects, or None if PyG/Torch unavailable.
     """
     if not (USE_PYG and USE_TORCH):
         logger.warning("PyG or Torch not available; cannot build PyG dataset.")
         return None
 
-    samples = load_jsonl_samples(jsonl_path)
+    # Load elements.json
+    try:
+        with open(elements_json_path, "r") as f:
+            raw_elements = json.load(f)["elements"]
+        elements_data = {e["symbol"].capitalize(): e for e in raw_elements}
+    except Exception as e:
+        logger.exception(f"Failed to load elements.json from {elements_json_path}: {e}")
+        return None
+
+    # Encode categorical features
+    block_map = {"s": 0, "p": 1, "d": 2, "f": 3}
+    phase_map = {"Gas": 0, "Liquid": 1, "Solid": 2}
+
+    # Load JSONL samples
+    try:
+        samples = load_jsonl_samples(jsonl_path)
+    except Exception as e:
+        logger.exception(f"Failed to load JSONL samples from {jsonl_path}: {e}")
+        return None
+
+    if not samples:
+        logger.warning(f"No samples found in {jsonl_path}")
+        return []
+
     data_list = []
 
-    for s in samples:
+    for idx, s in enumerate(samples):
         nodes = s.get("nodes", [])
         edges = s.get("edges", [])
         edge_labels = s.get("edge_labels", [])
 
-        # node features: mass, en, charge, pos(x), pos(y), bias
+        if not nodes:
+            logger.warning(f"Sample {idx} has no nodes, skipping.")
+            continue
+
+        # Build node feature tensor
         x = []
-        for n in nodes:
+        for n_idx, n in enumerate(nodes):
+            elem_symbol = n.get("element", "").capitalize()
+            elem_info = elements_data.get(elem_symbol, {})
+
+            # Node position
             pos = n.get("pos", [0.0, 0.0])
+            if not isinstance(pos, (list, tuple)) or len(pos) < 2:
+                logger.warning(f"Node {n_idx} in sample {idx} has invalid position {pos}, using [0.0, 0.0]")
+                pos = [0.0, 0.0]
+
+            # Extract features (JSONL overrides elements.json)
+            atomic_mass = float(n.get("mass", elem_info.get("atomic_mass", 0.0)))
+            en = float(n.get("en", elem_info.get("electronegativity_pauling", 0.0) or 0.0))
+            charge = float(n.get("charge", elem_info.get("charge", 0.0)))
+            electron_affinity = float(elem_info.get("electron_affinity", 0.0) or 0.0)
+            density = float(elem_info.get("density", 0.0) or 0.0)
+            molar_heat = float(elem_info.get("molar_heat", 0.0) or 0.0)
+            period = float(elem_info.get("period", 0))
+            group = float(elem_info.get("group", 0))
+            block = float(block_map.get(elem_info.get("block", "s").lower(), 0))
+            phase = float(phase_map.get(elem_info.get("phase", "Solid"), 2))
+            shells_count = float(len(elem_info.get("shells", [])))
+            
+            # Include up to first 3 ionization energies as separate features
+            ionization_energies = elem_info.get("ionization_energies", [0.0])
+            ie_features = [float(ionization_energies[i]) if i < len(ionization_energies) else 0.0 for i in range(3)]
+
             x.append([
-                n.get("mass", 0.0),
-                n.get("en", 0.0),
-                n.get("charge", 0.0),
-                pos[0],
-                pos[1],
-                1.0
+                atomic_mass, en, charge, electron_affinity, density, molar_heat,
+                period, group, block, phase, shells_count, *ie_features,
+                float(pos[0]), float(pos[1]), 1.0  # position + bias
             ])
+
         x_tensor = torch.tensor(x, dtype=torch.float)
 
-        # edges
-        if len(edges) == 0:
+        # Build edge tensors
+        if not edges:
             edge_index = torch.empty((2, 0), dtype=torch.long)
             edge_attr = torch.empty((0, 1), dtype=torch.float)
-            edge_label = torch.empty((0,), dtype=torch.long)
+            edge_label_tensor = torch.empty((0,), dtype=torch.long)
         else:
-            ei = torch.tensor(edges, dtype=torch.long).t().contiguous()
-            edge_index = ei
-            edge_attr = torch.ones((ei.shape[1], 1), dtype=torch.float)
-            edge_label = torch.tensor(edge_labels, dtype=torch.long)
+            try:
+                ei = torch.tensor(edges, dtype=torch.long).t().contiguous()
+                edge_index = ei
+                edge_attr = torch.ones((ei.shape[1], 1), dtype=torch.float)
+                if edge_labels and len(edge_labels) == ei.shape[1]:
+                    edge_label_tensor = torch.tensor(edge_labels, dtype=torch.long)
+                else:
+                    edge_label_tensor = torch.zeros((ei.shape[1],), dtype=torch.long)
+                    if edge_labels:
+                        logger.warning(f"Edge label count mismatch in sample {idx}; defaulting to zeros.")
+            except Exception as e:
+                logger.exception(f"Failed to process edges for sample {idx}: {e}")
+                edge_index = torch.empty((2, 0), dtype=torch.long)
+                edge_attr = torch.empty((0, 1), dtype=torch.float)
+                edge_label_tensor = torch.empty((0,), dtype=torch.long)
 
-        data = PyGData(x=x_tensor, edge_index=edge_index, edge_attr=edge_attr)
-        data.y = torch.tensor([0], dtype=torch.long)  # placeholder for reaction class
+        # Create PyG Data object
+        data = PyGData(
+            x=x_tensor,
+            edge_index=edge_index,
+            edge_attr=edge_attr
+        )
+        data.y = torch.tensor([0], dtype=torch.long)  # Placeholder for reaction class
+        data.edge_label = edge_label_tensor
         data_list.append(data)
 
+    logger.info(f"Built {len(data_list)} PyG Data samples from {jsonl_path} using full elements.json features")
     return data_list
 
 # -----------------------
