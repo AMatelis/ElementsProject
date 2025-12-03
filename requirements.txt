@@ -1,0 +1,9 @@
+numpy
+matplotlib
+plotly
+joblib
+networkx
+torch; platform_system!='Windows'
+# Optional: torch-geometric (PyG) - installation is more involved and OS-specific
+# pytorch-geometric
+seaborn

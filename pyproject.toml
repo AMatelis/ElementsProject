@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elementsproject"
+version = "0.1.0"
+description = "A lightweight 2D molecular reaction simulation with ML-friendly dataset export and demo HTML generation."
+authors = [
+    {name = "Author", email = "you@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {file = "LICENSE"}
+
+[project.urls]
+"Homepage" = "https://github.com/your/repo"
+"Documentation" = "https://github.com/your/repo/docs"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["models*", "*"]
