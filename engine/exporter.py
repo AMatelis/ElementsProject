@@ -26,6 +26,9 @@ def append_frame_jsonl(sim, out_path: Optional[str] = None) -> str:
         # if a directory provided, write into that directory with timestamped filename
         if os.path.isdir(out_path):
             out_dir = out_path
+            os.makedirs(out_dir, exist_ok=True)
+            filename = f"frames_{time.strftime('%Y%m%dT%H%M%S')}.jsonl"
+            target = os.path.join(out_dir, filename)
         else:
             # treat out_path as file path
             ensure_parent_dir(out_path)
