@@ -42,39 +42,6 @@ sim.run_steps(200, vis_interval=10)
 export_simulation_to_plotly_html(sim, 'water_sim.html', n_frames=200, fps=10)
 ```
 
-## Why this is publishable
-- The HTML export creates a shareable, interactive demo suitable for blog posts, documentation, or GitHub Pages.
-- It enables viewers to explore the simulation without needing to install the full Python stack.
-- As a demo, it showcases the core value of the project while being easy to distribute.
-
-## Contribution & Packaging
-To make this project publishable to PyPI or to deploy an online demo, the next steps would include:
-- Add unit tests, a proper package layout, and `pyproject.toml`/`setup.cfg`.
-- Add a small demo web app (Streamlit/Flask) and a Dockerfile.
-- Add a license, changelog, and documentation.
- 
-### Packaging & Publishing (quick steps)
-1. Create a PyPI account and API token.
-2. Build the package locally:
-```powershell
-python -m pip install --upgrade build
-python -m build
-```
-3. Upload to PyPI with twine (optional):
-```powershell
-python -m pip install --upgrade twine
-python -m twine upload dist/*
-```
-
-### Publish demo to GitHub Pages
-1. Run demo generation (CI or local):
-```powershell
-python scripts/export_demo.py
-```
-Automating: A GitHub Action (`.github/workflows/publish_docs.yml`) is included to automatically build a demo and deploy `./docs` to `gh-pages` when changes are pushed to the main branch. For quick manual publishing, use `scripts/release.sh`.
-2. The HTML will be written to `docs/demo_sim.html`.
-3. Commit and push the `docs/` dir and enable GitHub Pages from the `docs/` folder in the repository settings.
-
 ### Dev: Tests & CI
 We provide a minimal CI workflow that runs tests and generates a demo. To run tests locally:
 ```powershell
