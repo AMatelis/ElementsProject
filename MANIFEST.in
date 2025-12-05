@@ -1,8 +1,0 @@
-include README.md
-include LICENSE
-include requirements.txt
-include requirements-dev.txt
-recursive-include docs *.html *.png *.css *.js
-recursive-include data *.json
-recursive-include scripts *.py
-recursive-include tests *.py

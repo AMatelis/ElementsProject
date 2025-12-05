@@ -1,7 +1,0 @@
-data
-dist
-docs
-models
-outputs
-scripts
-tests
