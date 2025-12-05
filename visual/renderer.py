@@ -22,13 +22,14 @@ def render_simulation_frame(sim) -> None:
         sim.fig, sim.ax = plt.subplots(figsize=(6, 6))
 
     sim.ax.clear()
-    sim.ax.set_xlim(0, 1)
-    sim.ax.set_ylim(0, 1)
+    # Slight margin around [0,1] for nicer framing
+    sim.ax.set_xlim(-0.05, 1.05)
+    sim.ax.set_ylim(-0.05, 1.05)
     sim.ax.set_aspect('equal')
     sim.ax.set_xticks([])
     sim.ax.set_yticks([])
 
-    # Draw energy field overlay if available
+    # Draw energy / potential field overlay (subtle)
     draw_energy_field(sim)
 
     # Draw bonds
@@ -36,14 +37,35 @@ def render_simulation_frame(sim) -> None:
         try:
             x = [b.atom1.pos[0], b.atom2.pos[0]]
             y = [b.atom1.pos[1], b.atom2.pos[1]]
-            linewidth = 2
-            color = "#888888"
+            # thinner, more professional bond lines
+            base_width = 1.0
+            linewidth = base_width
+            color = "#A8A8A8"
             if hasattr(b, 'time_of_creation'):
                 dt = time.time() - b.time_of_creation
                 if dt < 0.4:
-                    linewidth += (0.4 - dt) * 10
-                    color = "#55aaff"
-            sim.ax.plot(x, y, color=color, linewidth=linewidth, zorder=1)
+                    # small transient highlight for new bonds
+                    linewidth += (0.4 - dt) * 2.5
+                    color = "#66bfff"
+            # Draw single/double/triple bond representation
+            if getattr(b, 'order', 1) == 1:
+                sim.ax.plot(x, y, color=color, linewidth=linewidth, zorder=1, antialiased=True)
+            else:
+                # offset small perpendicular vector to draw parallel lines for double/triple bonds
+                dx = x[1] - x[0]
+                dy = y[1] - y[0]
+                length = (dx*dx + dy*dy) ** 0.5 + 1e-12
+                ux, uy = dx/length, dy/length
+                # perpendicular
+                px, py = -uy, ux
+                offset = 0.004
+                # draw lines based on order
+                if b.order >= 2:
+                    sim.ax.plot([x[0]+px*offset, x[1]+px*offset], [y[0]+py*offset, y[1]+py*offset], color=color, linewidth=linewidth, zorder=1, antialiased=True)
+                    sim.ax.plot([x[0]-px*offset, x[1]-px*offset], [y[0]-py*offset, y[1]-py*offset], color=color, linewidth=linewidth, zorder=1, antialiased=True)
+                if b.order >= 3:
+                    # center line for triple
+                    sim.ax.plot(x, y, color=color, linewidth=linewidth, zorder=1, antialiased=True)
         except Exception:
             continue
 
@@ -51,10 +73,15 @@ def render_simulation_frame(sim) -> None:
     for a in getattr(sim, 'atoms', []):
         try:
             pos = a.pos
-            size = max(6, int(getattr(a, 'radius', 0.02) * 2000))
+            # More refined size scaling: use radius -> marker area
+            radius = getattr(a, 'radius', 0.2)
+            base_scale = 40.0
+            area = max(20.0, (radius * base_scale) ** 2)
             color = get_element_color(a.symbol)
-            sim.ax.scatter(pos[0], pos[1], s=size, c=color, edgecolors='black', zorder=2)
-            sim.ax.text(pos[0], pos[1] + 0.015, a.symbol, ha='center', va='bottom', fontsize=8, color='white', zorder=3)
+            # soft outline and slightly smaller markers for a cleaner look
+            sim.ax.scatter(pos[0], pos[1], s=area, c=[color], edgecolors=[(0,0,0,0.45)], linewidths=0.6, zorder=3, alpha=0.95)
+            # element label: smaller, slightly transparent
+            sim.ax.text(pos[0], pos[1] + 0.02, a.symbol, ha='center', va='bottom', fontsize=7, color='white', alpha=0.95, zorder=4)
         except Exception:
             continue
 
@@ -70,13 +97,15 @@ def draw_energy_field(sim) -> None:
     """
     if getattr(sim, 'ax', None) is None:
         return
-    gx = np.linspace(-1, 1, 200)
-    gy = np.linspace(-1, 1, 200)
+    # energy/potential visualization constrained to simulation domain [0,1]
+    gx = np.linspace(0, 1, 200)
+    gy = np.linspace(0, 1, 200)
     X, Y = np.meshgrid(gx, gy)
     R = np.sqrt(X**2 + Y**2)
-    field = np.exp(-4 * R)
-    sim.ax.imshow(field, extent=[-1, 1, -1, 1], origin='lower',
-                  cmap="inferno", alpha=0.12, interpolation="bilinear", zorder=0)
+    # subtle radial-like field for aesthetics (user can replace with real potential)
+    field = np.exp(-4 * ((X-0.5)**2 + (Y-0.5)**2))
+    sim.ax.imshow(field, extent=[0, 1, 0, 1], origin='lower',
+                  cmap="inferno", alpha=0.08, interpolation="bilinear", zorder=0)
 
 
 def activate_ghost_trails(sim, length: int = 20) -> None:
@@ -99,7 +128,11 @@ def draw_ghost_trails(sim) -> None:
         if len(trail) > 1:
             xs = [p[0] for p in trail]
             ys = [p[1] for p in trail]
-            sim.ax.plot(xs, ys, color="white", alpha=0.15, linewidth=1, zorder=0.5)
+            # draw trail with fading alpha along its length
+            n = len(xs)
+            for i in range(1, n):
+                a = max(0.03, 0.25 * (i / n))
+                sim.ax.plot([xs[i-1], xs[i]], [ys[i-1], ys[i]], color=(1,1,1), alpha=a*0.25, linewidth=0.8, zorder=0.5)
 
 
 def highlight_bonds(sim) -> None:

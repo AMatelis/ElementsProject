@@ -17,13 +17,13 @@ logger = logging.getLogger(__name__)
 # These defaults are "reduced" units suitable for interactive simulation.
 DEFAULT_DT = 1e-3
 DEFAULT_TEMPERATURE = 300.0
-DEFAULT_GAMMA = 1.0  # friction coefficient for Langevin thermostat
+DEFAULT_GAMMA = 0.6  # friction coefficient for Langevin thermostat (softer damping)
 DEFAULT_CELL_SIZE = 0.06
 
 # Non-bonded interactions
-LJ_EPSILON = 0.1          # depth of LJ well (reduced units)
-LJ_SIGMA_FACTOR = 0.9     # factor applied to sum of visual radii to get sigma
-NONBONDED_CUTOFF = 0.4    # neighbor cutoff radius (meters in reduced units)
+LJ_EPSILON = 0.05         # depth of LJ well (reduced units) — softened for smoother motion
+LJ_SIGMA_FACTOR = 0.95    # factor applied to sum of visual radii to get sigma
+NONBONDED_CUTOFF = 0.35   # neighbor cutoff radius (reduced units)
 
 # Coulomb (reduced; user can scale using element_data or external factors)
 COULOMB_K = 1.0  # reduced Coulomb prefactor (tune to get reasonable behavior)
@@ -55,6 +55,7 @@ class PhysicsEngine:
                  dt: float = DEFAULT_DT,
                  temperature: float = DEFAULT_TEMPERATURE,
                  gamma: float = DEFAULT_GAMMA,
+                 seed: Optional[int] = None,
                  periodic: bool = False,
                  box_size: float = 1.0,
                  cell_size: float = DEFAULT_CELL_SIZE):
@@ -77,7 +78,8 @@ class PhysicsEngine:
         self.time = 0.0
 
         # random number generator for thermostat
-        self.rng = np.random.default_rng(seed=None)
+        # Create a dedicated Generator so Langevin noise is reproducible when seed provided
+        self.rng = np.random.default_rng(seed=seed)
 
         # energy diagnostics cache
         self._last_energy: Dict[str, float] = {}

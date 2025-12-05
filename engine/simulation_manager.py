@@ -246,7 +246,8 @@ class SimulationManager:
                  temperature: float = 300.0,
                  auto_train_kb: bool = True,
                  deterministic_mode: bool = False,
-                 atom_history_maxlen: int = 2000):
+                 atom_history_maxlen: int = 2000,
+                 seed: Optional[int] = None):
         """
         formula_list: list of molecule dicts, e.g. [{"H":2,"O":1}, {"Na":1,"Cl":1}]
                       if None or empty, the simulation will start with no atoms.
@@ -255,6 +256,8 @@ class SimulationManager:
         self.temperature = float(temperature)
         self.auto_train_kb = bool(auto_train_kb)
         self.deterministic_mode = bool(deterministic_mode)
+        # deterministic seed (optional): used to seed Python random and NumPy legacy RNGs
+        self.seed = int(seed) if seed is not None else None
 
         # runtime state
         self.atoms: List[Atom] = []
@@ -267,13 +270,27 @@ class SimulationManager:
         # setup KB
         self.kb = ReactionKnowledgeBase(path_json=os.path.join("data", f"reaction_kb_{int(time.time())}.jsonl"))
 
+        # deterministic seeding for reproducibility (affects random, numpy legacy, and PhysicsEngine)
+        try:
+            import random as _random
+            if self.seed is not None:
+                _random.seed(self.seed)
+                # legacy numpy RNG seeding for code using np.random.*
+                import numpy as _np
+                _np.random.seed(self.seed)
+        except Exception:
+            logger.exception("Failed to set deterministic seeds.")
+
         # build atoms from formulas
         self._build_atoms_from_formulas(self._initial_formulas)
 
-        # physics and reaction engine
-        self.physics = PhysicsEngine(self.atoms, self.bonds, dt=1e-3, temperature=self.temperature)
+        # physics and reaction engine (pass seed to engine RNG)
+        self.physics = PhysicsEngine(self.atoms, self.bonds, dt=1e-3, temperature=self.temperature, seed=self.seed)
         self.reaction_engine = ReactionEngine(self.atoms, self.bonds, self.physics, kb=self.kb)
         self.reaction_engine.deterministic_mode = self.deterministic_mode
+
+        # optional per-frame exporter path (set via start_frame_export)
+        self._frame_export_path: Optional[str] = None
 
         # visualization handles (kept minimal here)
         self.fig = None
@@ -343,6 +360,15 @@ class SimulationManager:
                     self.kb.export_jsonl()  # writes current KB out
                 except Exception:
                     logger.exception("Dataset export failed during run.")
+
+            # per-frame exporter (if enabled)
+            try:
+                if getattr(self, "_frame_export_path", None):
+                    # lazy import to avoid circular issues
+                    from .exporter import append_frame_jsonl
+                    append_frame_jsonl(self, out_path=self._frame_export_path)
+            except Exception:
+                logger.exception("Per-frame export failed.")
 
         except Exception:
             logger.exception("SimulationManager.step failed.")
@@ -488,6 +514,26 @@ class SimulationManager:
                 logger.info(f"Bond broken: {uid1}-{uid2}")
 
         self.step = wrapped_step
+
+    # -----------------------
+    # Frame export control
+    # -----------------------
+    def start_frame_export(self, out_path: Optional[str] = None) -> str:
+        """Enable per-frame JSONL export. If out_path is a directory, a timestamped file
+        will be created inside it. Returns the path that will be written to."""
+        if out_path is None:
+            out_dir = os.path.join(os.getcwd(), "data", "exports")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = out_dir
+        # store path and return
+        self._frame_export_path = out_path
+        logger.info(f"Per-frame export enabled -> {self._frame_export_path}")
+        return self._frame_export_path
+
+    def stop_frame_export(self) -> None:
+        """Disable per-frame exporting."""
+        self._frame_export_path = None
+        logger.info("Per-frame export disabled.")
 
 # -----------------------
 # Helper utilities
