@@ -384,11 +384,11 @@ class SimulationGUIAdvanced(tk.Tk):
             # Render main frame with extended zoom-out
             render_simulation_frame(self.sim)
             if self.canvas and self.sim.fig:
-                ax = self.sim.ax
+                ax = getattr(self.sim, 'main_ax', None)
                 if ax:
                     ax.set_xlim(-0.1, 1.1)
                     ax.set_ylim(-0.1, 1.1)
-                
+
                 # Heatmap overlay
                 if self.heatmap_var.get() and ax:
                     try:
@@ -397,7 +397,7 @@ class SimulationGUIAdvanced(tk.Tk):
                                  cmap='hot', alpha=0.2, zorder=1)
                     except:
                         pass
-                
+
                 self.canvas.figure = self.sim.fig
                 self.canvas.draw_idle()
             

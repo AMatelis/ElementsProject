@@ -74,6 +74,19 @@ python cli.py --formulas H2,O --frames 600 --export-html sim.html --export-frame
 elements-sim --formulas H2,O --frames 600 --export-html sim.html --export-frames 500 --export-fps 12 --deterministic
 ```
 
+### CLI: Export per-frame JSONL for ML
+
+There's a small CLI script to generate per-frame JSONL traces suitable for ML training:
+
+```powershell
+# Example: run a 300-frame deterministic simulation and write per-frame JSONL files
+python scripts/export_dataset.py --frames 300 --seed 42 --out data/exports --deterministic
+
+# The output file will be created under `data/exports/` (e.g. `frames_YYYYMMDDTHHMMSS.jsonl`).
+```
+
+The JSONL format writes one JSON object per line with fields: `timestamp`, `frame`, `dt`, `seed`, `atoms` (list of uid,symbol,pos,vel,mass) and `bonds` (list of [uid1, uid2, order]).
+
 3. View the exported HTML locally or upload to GitHub Pages.
 
 ## GUI

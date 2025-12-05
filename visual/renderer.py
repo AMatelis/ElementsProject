@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 from engine.atoms import Atom
 from engine.elements_data import ELEMENT_DATA, load_elements
 from engine.bonds import BondObj
-from visual.colors import get_element_color
+from visual.colors import get_element_color, get_element_rgb, VISUAL_BG
 
 
 def render_simulation_frame(sim) -> None:
@@ -18,16 +18,23 @@ def render_simulation_frame(sim) -> None:
     Render the current frame of the simulation into sim.fig and sim.ax.
     Creates a new figure if not present.
     """
-    if getattr(sim, 'fig', None) is None or getattr(sim, 'ax', None) is None:
-        sim.fig, sim.ax = plt.subplots(figsize=(6, 6))
+    # Create a two-column layout: main canvas + side time-series panel
+    if getattr(sim, 'fig', None) is None or getattr(sim, 'main_ax', None) is None or getattr(sim, 'side_ax', None) is None:
+        sim.fig = plt.figure(figsize=(10, 6), facecolor=VISUAL_BG)
+        # main axis: left, large
+        sim.main_ax = sim.fig.add_subplot(1, 2, 1)
+        # side axis: right, for energy / loss plots
+        sim.side_ax = sim.fig.add_subplot(1, 2, 2)
 
-    sim.ax.clear()
+    # prepare main simulation axes
+    sim.main_ax.clear()
     # Slight margin around [0,1] for nicer framing
-    sim.ax.set_xlim(-0.05, 1.05)
-    sim.ax.set_ylim(-0.05, 1.05)
-    sim.ax.set_aspect('equal')
-    sim.ax.set_xticks([])
-    sim.ax.set_yticks([])
+    sim.main_ax.set_xlim(-0.05, 1.05)
+    sim.main_ax.set_ylim(-0.05, 1.05)
+    sim.main_ax.set_aspect('equal')
+    sim.main_ax.set_xticks([])
+    sim.main_ax.set_yticks([])
+    sim.main_ax.set_facecolor(VISUAL_BG)
 
     # Draw energy / potential field overlay (subtle)
     draw_energy_field(sim)
@@ -49,7 +56,7 @@ def render_simulation_frame(sim) -> None:
                     color = "#66bfff"
             # Draw single/double/triple bond representation
             if getattr(b, 'order', 1) == 1:
-                sim.ax.plot(x, y, color=color, linewidth=linewidth, zorder=1, antialiased=True)
+                sim.main_ax.plot(x, y, color=color, linewidth=linewidth, zorder=1, antialiased=True)
             else:
                 # offset small perpendicular vector to draw parallel lines for double/triple bonds
                 dx = x[1] - x[0]
@@ -61,11 +68,11 @@ def render_simulation_frame(sim) -> None:
                 offset = 0.004
                 # draw lines based on order
                 if b.order >= 2:
-                    sim.ax.plot([x[0]+px*offset, x[1]+px*offset], [y[0]+py*offset, y[1]+py*offset], color=color, linewidth=linewidth, zorder=1, antialiased=True)
-                    sim.ax.plot([x[0]-px*offset, x[1]-px*offset], [y[0]-py*offset, y[1]-py*offset], color=color, linewidth=linewidth, zorder=1, antialiased=True)
+                    sim.main_ax.plot([x[0]+px*offset, x[1]+px*offset], [y[0]+py*offset, y[1]+py*offset], color=color, linewidth=linewidth, zorder=1, antialiased=True)
+                    sim.main_ax.plot([x[0]-px*offset, x[1]-px*offset], [y[0]-py*offset, y[1]-py*offset], color=color, linewidth=linewidth, zorder=1, antialiased=True)
                 if b.order >= 3:
                     # center line for triple
-                    sim.ax.plot(x, y, color=color, linewidth=linewidth, zorder=1, antialiased=True)
+                    sim.main_ax.plot(x, y, color=color, linewidth=linewidth, zorder=1, antialiased=True)
         except Exception:
             continue
 
@@ -79,14 +86,17 @@ def render_simulation_frame(sim) -> None:
             area = max(20.0, (radius * base_scale) ** 2)
             color = get_element_color(a.symbol)
             # soft outline and slightly smaller markers for a cleaner look
-            sim.ax.scatter(pos[0], pos[1], s=area, c=[color], edgecolors=[(0,0,0,0.45)], linewidths=0.6, zorder=3, alpha=0.95)
-            # element label: smaller, slightly transparent
-            sim.ax.text(pos[0], pos[1] + 0.02, a.symbol, ha='center', va='bottom', fontsize=7, color='white', alpha=0.95, zorder=4)
+            sim.main_ax.scatter(pos[0], pos[1], s=area, c=[color], edgecolors=[(0,0,0,0.45)], linewidths=0.6, zorder=3, alpha=0.95)
+            # element label: choose dark label for white background
+            sim.main_ax.text(pos[0], pos[1] + 0.02, a.symbol, ha='center', va='bottom', fontsize=7, color='black', alpha=0.95, zorder=4)
         except Exception:
             continue
 
     # Draw ghost trails if available
     draw_ghost_trails(sim)
+
+    # update side panel with energy + training loss
+    draw_time_series_panel(sim)
 
     sim.fig.tight_layout()
 
@@ -95,7 +105,7 @@ def draw_energy_field(sim) -> None:
     """
     Optional aesthetic: overlay a soft energy/fog field to show potential regions.
     """
-    if getattr(sim, 'ax', None) is None:
+    if getattr(sim, 'main_ax', None) is None:
         return
     # energy/potential visualization constrained to simulation domain [0,1]
     gx = np.linspace(0, 1, 200)
@@ -104,8 +114,9 @@ def draw_energy_field(sim) -> None:
     R = np.sqrt(X**2 + Y**2)
     # subtle radial-like field for aesthetics (user can replace with real potential)
     field = np.exp(-4 * ((X-0.5)**2 + (Y-0.5)**2))
-    sim.ax.imshow(field, extent=[0, 1, 0, 1], origin='lower',
-                  cmap="inferno", alpha=0.08, interpolation="bilinear", zorder=0)
+    # draw onto main_ax so it appears behind atoms/bonds
+    sim.main_ax.imshow(field, extent=[0, 1, 0, 1], origin='lower',
+                       cmap="inferno", alpha=0.08, interpolation="bilinear", zorder=0)
 
 
 def activate_ghost_trails(sim, length: int = 20) -> None:
@@ -132,7 +143,7 @@ def draw_ghost_trails(sim) -> None:
             n = len(xs)
             for i in range(1, n):
                 a = max(0.03, 0.25 * (i / n))
-                sim.ax.plot([xs[i-1], xs[i]], [ys[i-1], ys[i]], color=(1,1,1), alpha=a*0.25, linewidth=0.8, zorder=0.5)
+                sim.main_ax.plot([xs[i-1], xs[i]], [ys[i-1], ys[i]], color=(0.15, 0.15, 0.15), alpha=a*0.35, linewidth=0.8, zorder=0.5)
 
 
 def highlight_bonds(sim) -> None:
@@ -146,9 +157,38 @@ def highlight_bonds(sim) -> None:
         dt = now - getattr(b, 'time_of_creation', 0.0)
         if dt < 0.4:
             glow = max(0.0, 0.4 - dt) * 10
-            sim.ax.plot([b.atom1.pos[0], b.atom2.pos[0]],
-                        [b.atom1.pos[1], b.atom2.pos[1]],
-                        linewidth=glow, color="#55aaff", alpha=0.1, zorder=1)
+            sim.main_ax.plot([b.atom1.pos[0], b.atom2.pos[0]],
+                             [b.atom1.pos[1], b.atom2.pos[1]],
+                             linewidth=glow, color="#55aaff", alpha=0.12, zorder=1)
+
+
+def draw_time_series_panel(sim) -> None:
+    """Draw energy history and training loss on the side panel."""
+    if getattr(sim, 'side_ax', None) is None:
+        return
+    ax = sim.side_ax
+    ax.clear()
+    ax.set_facecolor(VISUAL_BG)
+    # fetch histories (may not exist yet)
+    energy = list(getattr(sim, 'energy_history', []))
+    loss = list(getattr(sim, 'training_loss_history', []))
+    frames = list(range(len(energy))) if energy else []
+    ax.set_title('Energy / Training Loss', fontsize=9)
+    ax.tick_params(axis='both', which='major', labelsize=8)
+    # plot energy on primary y axis
+    if energy:
+        ax.plot(frames, energy, color='#ff8800', label='Total Energy')
+    # plot training loss on secondary axis
+    if loss:
+        ax2 = ax.twinx()
+        loss_frames = list(range(len(loss)))
+        ax2.plot(loss_frames, loss, color='#0066cc', linestyle='--', label='Train Loss')
+        ax2.tick_params(axis='y', labelsize=8)
+    # small legend
+    ax.legend(loc='upper left', fontsize=7)
+    # minimal layout
+    ax.set_xlabel('Frame', fontsize=8)
+    ax.set_ylabel('Energy', fontsize=8)
 
 
 def update_visual_with_effects(sim) -> None:

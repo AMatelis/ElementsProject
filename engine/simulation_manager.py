@@ -298,6 +298,9 @@ class SimulationManager:
 
         # event log for end-of-run export (keeps references to KB events)
         self.event_log: List[Dict[str, Any]] = []
+        # per-frame metrics for visualization / ML
+        self.energy_history: List[float] = []
+        self.training_loss_history: List[float] = []
 
         logger.info(f"SimulationManager initialized: atoms={len(self.atoms)} bonds={len(self.bonds)}")
 
@@ -312,14 +315,28 @@ class SimulationManager:
         self.atoms = []
         uid_counter = 0
         for midx, fdict in enumerate(formula_list):
-            # choose a cluster center to separate molecules in space
-            center = np.clip(np.random.rand(2) * 0.6 + 0.2, 0.0, 1.0)
+            # choose a cluster center away from edges for nicer visuals
+            center = np.clip(np.random.rand(2) * 0.5 + 0.25, 0.15, 0.85)
             for sym, cnt in fdict.items():
                 for i in range(max(1, int(cnt))):
                     uid = f"m{midx}_a{uid_counter}"
-                    pos = center + np.random.normal(scale=0.02, size=2)
-                    pos = np.clip(pos, 0.0, 1.0)
-                    atom = Atom(symbol=sym, pos=pos, vel=np.zeros(2), uid=uid)
+                    # small scatter around the center proportional to covalent radius
+                    # use element covalent radius to avoid overlaps
+                    try:
+                        from engine.elements_data import get_element
+                        r = float(get_element(sym).get('covalent_radius', 0.7))
+                    except Exception:
+                        r = 0.7
+                    dist_scale = max(0.005, r * 0.08)
+                    pos = center + np.random.normal(scale=dist_scale, size=2)
+                    pos = np.clip(pos, 0.05, 0.95)
+                    # small thermal velocity based on mass / temperature
+                    try:
+                        import numpy as _np
+                        vel = _np.random.normal(scale=0.005, size=2)
+                    except Exception:
+                        vel = np.zeros(2)
+                    atom = Atom(symbol=sym, pos=pos, vel=vel, uid=uid)
                     self.atoms.append(atom)
                     uid_counter += 1
         # ensure physics engine (if present) references new atoms
@@ -350,6 +367,18 @@ class SimulationManager:
             # history recording for visualization / export
             for a in self.atoms:
                 a.record(self.frame)
+
+            # energy diagnostics for visualization/ML
+            try:
+                e = float(self.physics.total_energy().get('total', 0.0))
+            except Exception:
+                e = 0.0
+            self.energy_history.append(e)
+
+            # training loss placeholder: if ML trainer present, it can push values here
+            if not self.training_loss_history:
+                # seed with None or 0-length. downstream code can detect empty list.
+                pass
 
             self.frame += 1
 

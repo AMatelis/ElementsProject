@@ -175,7 +175,8 @@ class SimulationGUI:
             self._refresh_products()
             if self.heatmap_var.get():
                 xx, yy, heat = compute_reactivity_heatmap(self.sim)
-                self.sim.ax.imshow(heat, extent=[0,1,0,1], origin='lower', cmap='inferno', alpha=0.45)
+                if getattr(self.sim, 'main_ax', None) is not None:
+                    self.sim.main_ax.imshow(heat, extent=[0,1,0,1], origin='lower', cmap='inferno', alpha=0.45)
         except Exception:
             pass
         self.root.after(200, self._periodic_update)
