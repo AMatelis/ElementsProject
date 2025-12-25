@@ -7,6 +7,7 @@ from collections import deque, defaultdict
 from typing import Optional, Dict
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ from engine.atoms import Atom
 from engine.elements_data import ELEMENT_DATA
 from engine.simulation_manager import SimulationManager
 from visual.colors import get_element_color
+from engine.units import format_unit
 
 # ────────────────────────────
 # Utility: ensure_dir
@@ -51,6 +53,51 @@ def save_frame_png(sim: SimulationManager, filename: Optional[str] = None):
         render_simulation_frame(sim)
     sim.fig.savefig(filename, dpi=200, bbox_inches='tight')
     logger.info(f"Saved frame to {filename}")
+    return filename
+
+
+def save_sidepanel_png(sim: SimulationManager, filename: Optional[str] = None):
+    """Render and save only the side time-series panel (energy + training loss) as a PNG.
+    This creates a small export independent of the main figure to make publication-ready plots."""
+    if filename is None:
+        filename = os.path.join("outputs", f"sidepanel_{now_str()}.png")
+    ensure_dir(os.path.dirname(filename) or "outputs")
+
+    # Prepare a fresh small figure and replicate the side panel plotting
+    fig, ax = plt.subplots(figsize=(4, 4), dpi=200)
+    try:
+        energy = list(getattr(sim, 'energy_history', []))
+        loss = list(getattr(sim, 'training_loss_history', []))
+        drift = list(getattr(sim.sim, 'energy_drift_history', []))
+        frames = list(range(len(energy))) if energy else []
+        ax.set_facecolor('white')
+        ax.set_title('Energy / Drift / Loss', fontsize=9)
+        ax.tick_params(axis='both', which='major', labelsize=8)
+        if energy:
+            ax.plot(frames, energy, color='#ff8800', label='Total Energy')
+        if loss:
+            ax2 = ax.twinx()
+            loss_frames = list(range(len(loss)))
+            ax2.plot(loss_frames, loss, color='#0066cc', linestyle='--', label='Train Loss')
+            ax2.tick_params(axis='y', labelsize=8)
+        if drift:
+            ax3 = ax.twinx()
+            ax3.spines["right"].set_position(("axes", 1.1))  # offset the third axis
+            drift_frames = list(range(len(drift)))
+            ax3.plot(drift_frames, drift, color='#ff0000', linestyle='-', label='Energy Drift')
+            ax3.set_ylabel('Relative Energy Drift', fontsize=8)
+            ax3.tick_params(axis='y', labelsize=8)
+        ax.set_xlabel('Time Step', fontsize=8)
+        ax.set_ylabel(f'Energy ({format_unit("energy")})', fontsize=8)
+        ax.legend(loc='upper left', fontsize=7)
+        fig.tight_layout()
+        fig.savefig(filename, dpi=200)
+        logger.info(f"Saved side-panel plot to {filename}")
+    finally:
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
     return filename
 
 

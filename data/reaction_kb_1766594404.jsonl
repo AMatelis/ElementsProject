@@ -1,0 +1,1 @@
+{"timestamp": "20251224T114004", "frame": 0, "event_type": "bond_formed", "atoms": [{"uid": "m0_a0", "symbol": "H", "pos": [1.5663841520311497, 1.191811444617436], "charge": 0.0}, {"uid": "m0_a1", "symbol": "H", "pos": [1.6512130860405922, 1.200240770548202], "charge": 0.0}], "bonds": [["m0_a0", "m0_a1", 1]], "temperature": 300.0, "energy": 1.0}

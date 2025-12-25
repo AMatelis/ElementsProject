@@ -8,6 +8,7 @@ import time
 from .atoms import Atom
 from .bonds import BondObj
 from .spatial_hash import SpatialHash
+from .integrators import create_integrator
 
 logger = logging.getLogger(__name__)
 
@@ -17,19 +18,22 @@ logger = logging.getLogger(__name__)
 # These defaults are "reduced" units suitable for interactive simulation.
 DEFAULT_DT = 1e-3
 DEFAULT_TEMPERATURE = 300.0
-DEFAULT_GAMMA = 0.6  # friction coefficient for Langevin thermostat (softer damping)
+DEFAULT_GAMMA = 0.0  # disabled for testing energy conservation
 DEFAULT_CELL_SIZE = 0.06
 
 # Non-bonded interactions
-LJ_EPSILON = 0.05         # depth of LJ well (reduced units) — softened for smoother motion
+LJ_EPSILON = 0.002         # depth of LJ well (reduced units) — softened for smoother motion
 LJ_SIGMA_FACTOR = 0.95    # factor applied to sum of visual radii to get sigma
-NONBONDED_CUTOFF = 0.35   # neighbor cutoff radius (reduced units)
+NONBONDED_CUTOFF = 2.5   # neighbor cutoff radius (reduced units)
 
 # Coulomb (reduced; user can scale using element_data or external factors)
 COULOMB_K = 1.0  # reduced Coulomb prefactor (tune to get reasonable behavior)
 
 # Bond force safety limits
 DEFAULT_MAX_FORCE = 1e5
+
+# velocity safety clamp (reduced units)
+DEFAULT_MAX_VELOCITY = 5.0
 
 # small eps to avoid div-by-zero
 _EPS = 1e-12
@@ -56,9 +60,11 @@ class PhysicsEngine:
                  temperature: float = DEFAULT_TEMPERATURE,
                  gamma: float = DEFAULT_GAMMA,
                  seed: Optional[int] = None,
+                 rng: Optional[np.random.Generator] = None,
                  periodic: bool = False,
-                 box_size: float = 1.0,
-                 cell_size: float = DEFAULT_CELL_SIZE):
+                 box_size: float = 2.0,
+                 cell_size: float = DEFAULT_CELL_SIZE,
+                 integrator_type: str = "velocity_verlet"):
         # Simulation state
         self.atoms: List[Atom] = atoms if atoms is not None else []
         self.bonds: List[BondObj] = bonds if bonds is not None else []
@@ -79,7 +85,13 @@ class PhysicsEngine:
 
         # random number generator for thermostat
         # Create a dedicated Generator so Langevin noise is reproducible when seed provided
-        self.rng = np.random.default_rng(seed=seed)
+        if rng is not None:
+            self.rng = rng
+        else:
+            self.rng = np.random.default_rng(seed=seed)
+
+        # integrator
+        self.integrator = create_integrator(integrator_type, dt, self.atoms, box_size, periodic)
 
         # energy diagnostics cache
         self._last_energy: Dict[str, float] = {}
@@ -162,8 +174,9 @@ class PhysicsEngine:
                 forces[a] += f_a_on_b
                 forces[n] += f_b_on_a
 
-        # 5) Langevin thermostat (stochastic force + friction) and integrate (Velocity-Verlet-ish)
-        dt = self.dt
+        # 5) Velocity-Verlet integration with Langevin thermostat
+        # Compute old accelerations with thermostat
+        old_accs = []
         for a in self.atoms:
             # compute random noise (Langevin): sqrt(2 * gamma * kT / m) * Normal(0,1)
             if self.gamma > 0.0:
@@ -174,29 +187,75 @@ class PhysicsEngine:
 
             friction = -self.gamma * a.vel
             total_force = forces[a] + rand_kick + friction
+            old_acc = total_force / max(a.mass, 1e-12)
+            old_accs.append(old_acc)
 
-            # acceleration
-            acc = total_force / max(a.mass, 1e-12)
+        # Update positions
+        self.integrator.update_positions(old_accs)
 
-            # integrate velocities and positions
-            # velocity half-step
-            a.vel += acc * dt
-            # position update
-            a.pos += a.vel * dt
+        # 6) Recompute forces with new positions
+        self.rebuild_spatial()
+        new_forces = {a: np.zeros_like(a.pos) for a in self.atoms}
 
-            # optional position wrapping / clamping
-            if self.periodic:
-                a.pos = self._wrap_position(a.pos)
+        # bond forces
+        for b in list(self.bonds):
+            try:
+                f_on_1, f_on_2 = self._bond_force(b)
+                new_forces[b.atom1] += f_on_1
+                new_forces[b.atom2] += f_on_2
+            except Exception:
+                logger.exception("Error computing bond force for bond %s", repr(b))
+
+        # non-bonded forces
+        for a in self.atoms:
+            neighbors = self.spatial.neighbors(a, radius=cutoff)
+            for n in neighbors:
+                if n is a:
+                    continue
+                if id(n) <= id(a):
+                    continue
+                try:
+                    f_a_on_b, f_b_on_a = self._pairwise_nonbonded_forces(a, n)
+                except Exception:
+                    logger.exception("Error in pairwise force computation between %s and %s", a.uid, n.uid)
+                    continue
+                new_forces[a] += f_a_on_b
+                new_forces[n] += f_b_on_a
+
+        # 7) Complete velocity update
+        new_accs = []
+        for a in self.atoms:
+            # thermostat for new forces
+            if self.gamma > 0.0:
+                sigma = math.sqrt(max(0.0, 2.0 * self.gamma * self._kT() / max(a.mass, 1e-12)))
+                rand_kick = self.rng.normal(0.0, sigma, size=a.pos.shape)
             else:
-                # clamp to [0, box_size]
-                a.pos = np.clip(a.pos, 0.0, self.box_size)
+                rand_kick = np.zeros_like(a.pos)
 
+            friction = -self.gamma * a.vel
+            total_new_force = new_forces[a] + rand_kick + friction
+            new_acc = total_new_force / max(a.mass, 1e-12)
+            new_accs.append(new_acc)
+
+        self.integrator.update_velocities(new_accs)
+
+        # damping and clamping
+        for a in self.atoms:
             # tiny damping to improve stability
-            a.vel *= 0.999
+            a.vel *= 1.0
+
+            # safety clamp velocities to avoid numerical explosions
+            try:
+                vmax = DEFAULT_MAX_VELOCITY
+                vmag = np.linalg.norm(a.vel)
+                if vmag > vmax and vmag > 0:
+                    a.vel = a.vel * (vmax / vmag)
+            except Exception:
+                pass
 
         # 6) post-step bookkeeping
         self.frame += 1
-        self.time += dt
+        self.time += self.dt
 
     # -----------------------
     # Force computations
@@ -272,6 +331,7 @@ class PhysicsEngine:
         """
         Compute approximate potential energy: bond springs + pairwise LJ + Coulomb.
         WARNING: O(n^2) if spatial hash not used for pairs; here we use neighbor queries.
+        Note: This is an estimate using simplified force fields, not quantum mechanical energies.
         """
         pe_bond = 0.0
         for b in self.bonds:
@@ -294,17 +354,17 @@ class PhysicsEngine:
                 r = np.linalg.norm(n.pos - a.pos) + _EPS
                 # LJ potential: 4*eps * ((sigma/r)^12 - (sigma/r)^6)
                 sigma = (a.radius + n.radius) * LJ_SIGMA_FACTOR
-                if r < NONBONDED_CUTOFF:
+                if r < NONBONDED_CUTOFF and not a.is_bonded_to(n):
                     sr6 = (sigma / r) ** 6
                     pe_nb += 4.0 * LJ_EPSILON * (sr6 * sr6 - sr6)
                 # Coulomb
-                if abs(a.charge) + abs(n.charge) > 1e-12:
+                if abs(a.charge) + abs(n.charge) > 1e-12 and not a.is_bonded_to(n):
                     pe_nb += COULOMB_K * (a.charge * n.charge) / (r + _EPS)
         total_pe = float(pe_bond + pe_nb)
         return total_pe
 
     def total_energy(self) -> Dict[str, float]:
-        """Return a dict with kinetic, potential, and total energies."""
+        """Return a dict with estimated kinetic, potential, and total energies."""
         ke = self.kinetic_energy()
         pe = self.potential_energy()
         tot = ke + pe

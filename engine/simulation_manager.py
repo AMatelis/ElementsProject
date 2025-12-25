@@ -10,11 +10,13 @@ from collections import defaultdict
 import numpy as np
 
 # Import engine submodules
+from .metrics import EnergyMetrics
 from .atoms import Atom
 from .bonds import BondObj, can_form_bond, sanitize_bonds
 from .physics import PhysicsEngine
 from . import products
 from .formula_parser import parse_formula
+from .simulation import Simulation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -100,136 +102,6 @@ class ReactionKnowledgeBase:
 # -----------------------
 # Reaction Engine (bond formation / breakage)
 # -----------------------
-class ReactionEngine:
-    """
-    Responsible for:
-      - scanning neighbor lists for candidate bond formation
-      - using can_form_bond heuristics (from bonds.py) to decide on formation
-      - evaluating existing bonds for breakage using BondObj.should_break()
-      - logging bond events to the KB (if provided)
-
-    This implementation keeps deterministic_mode flag that forces rule-driven bond formation
-    to be evaluated for all pairs (useful for prediction mode).
-    """
-    def __init__(self,
-                 atoms: List[Atom],
-                 bonds: List[BondObj],
-                 physics: PhysicsEngine,
-                 kb: Optional[ReactionKnowledgeBase] = None,
-                 scan_radius: float = 0.18):
-        self.atoms = atoms
-        self.bonds = bonds
-        self.physics = physics
-        self.kb = kb
-        self.scan_radius = float(scan_radius)
-        self.enabled = True
-        self.deterministic_mode = False
-
-    def step(self, frame: int) -> None:
-        """
-        Evaluate bond formation and breakage for the current simulation state.
-        This function mutates self.bonds and Atom.bonds lists when bonds are formed/broken.
-        """
-        # If disabled, only process breakage to allow cleanup
-        if not self.enabled:
-            self._check_breakage(frame)
-            return
-
-        # Build candidate pairs
-        candidates: List[Tuple[Atom, Atom]] = []
-        if self.deterministic_mode:
-            # evaluate all unique pairs
-            n = len(self.atoms)
-            for i in range(n):
-                for j in range(i + 1, n):
-                    candidates.append((self.atoms[i], self.atoms[j]))
-        else:
-            # local neighbor-based candidates via physics.spatial
-            for a in self.atoms:
-                neighs = self.physics.spatial.neighbors(a, radius=self.scan_radius)
-                for n in neighs:
-                    # avoid duplicates — only evaluate if uid ordering matches
-                    if getattr(a, "uid") >= getattr(n, "uid"):
-                        continue
-                    # skip if already bonded directly
-                    if a.is_bonded_to(n):
-                        continue
-                    candidates.append((a, n))
-
-        # Evaluate candidates
-        for a, b in candidates:
-            try:
-                can, score = can_form_bond(a, b, self.physics.temperature)
-                if can:
-                    # probabilistic acceptance unless deterministic_mode
-                    if self.deterministic_mode or (score >= 1.0) or (np.random.rand() < float(score)):
-                        # create bond
-                        bond = BondObj(a, b, order=1)
-                        # track bond creation time
-                        bond.time_of_creation = time.time()
-                        self.bonds.append(bond)
-                        # log event
-                        ev = {
-                            "timestamp": time.strftime("%Y%m%dT%H%M%S"),
-                            "frame": frame,
-                            "event_type": "bond_formed",
-                            "atoms": [
-                                {"uid": a.uid, "symbol": a.symbol, "pos": list(map(float, a.pos)), "charge": float(a.charge)},
-                                {"uid": b.uid, "symbol": b.symbol, "pos": list(map(float, b.pos)), "charge": float(b.charge)}
-                            ],
-                            "bonds": [(a.uid, b.uid, bond.order)],
-                            "temperature": float(self.physics.temperature),
-                            "energy": float(bond.estimate_bond_energy())
-                        }
-                        try:
-                            if self.kb:
-                                self.kb.add_event(ev)
-                        except Exception:
-                            logger.exception("KB add_event failed for bond formation.")
-            except Exception:
-                logger.exception("Error evaluating candidate pair for bonding.")
-
-        # Evaluate existing bonds for breakage
-        self._check_breakage(frame)
-
-    def _check_breakage(self, frame: int) -> None:
-        # we iterate over a snapshot of bonds that existed before this step
-        existing = list(self.bonds)
-        for b in existing:
-            try:
-                brk, severity = b.should_break(self.physics.temperature)
-                if brk:
-                    # safely remove bond
-                    try:
-                        self.bonds.remove(b)
-                    except ValueError:
-                        pass
-                    try:
-                        b.atom1.remove_bond(b)
-                        b.atom2.remove_bond(b)
-                    except Exception:
-                        logger.debug("Failed to remove bond from atom lists during breakage.")
-                    ev = {
-                        "timestamp": time.strftime("%Y%m%dT%H%M%S"),
-                        "frame": frame,
-                        "event_type": "bond_broken",
-                        "atoms": [
-                            {"uid": b.atom1.uid, "symbol": b.atom1.symbol, "pos": list(map(float, b.atom1.pos)), "charge": float(b.atom1.charge)},
-                            {"uid": b.atom2.uid, "symbol": b.atom2.symbol, "pos": list(map(float, b.atom2.pos)), "charge": float(b.atom2.charge)}
-                        ],
-                        "bonds": [(b.atom1.uid, b.atom2.uid, b.order)],
-                        "temperature": float(self.physics.temperature),
-                        "severity": float(severity)
-                    }
-                    try:
-                        if self.kb:
-                            self.kb.add_event(ev)
-                    except Exception:
-                        logger.exception("KB add_event failed for bond breakage.")
-            except Exception:
-                logger.exception("Error evaluating bond breakage.")
-
-
 # -----------------------
 # SimulationManager
 # -----------------------
@@ -260,8 +132,6 @@ class SimulationManager:
         self.seed = int(seed) if seed is not None else None
 
         # runtime state
-        self.atoms: List[Atom] = []
-        self.bonds: List[BondObj] = []
         self.frame: int = 0
         self._initial_formulas = list(self.formula_list)
         self._running = False
@@ -270,81 +140,68 @@ class SimulationManager:
         # setup KB
         self.kb = ReactionKnowledgeBase(path_json=os.path.join("data", f"reaction_kb_{int(time.time())}.jsonl"))
 
-        # deterministic seeding for reproducibility (affects random, numpy legacy, and PhysicsEngine)
-        try:
-            import random as _random
-            if self.seed is not None:
-                _random.seed(self.seed)
-                # legacy numpy RNG seeding for code using np.random.*
-                import numpy as _np
-                _np.random.seed(self.seed)
-        except Exception:
-            logger.exception("Failed to set deterministic seeds.")
-
-        # build atoms from formulas
-        self._build_atoms_from_formulas(self._initial_formulas)
-
-        # physics and reaction engine (pass seed to engine RNG)
-        self.physics = PhysicsEngine(self.atoms, self.bonds, dt=1e-3, temperature=self.temperature, seed=self.seed)
-        self.reaction_engine = ReactionEngine(self.atoms, self.bonds, self.physics, kb=self.kb)
-        self.reaction_engine.deterministic_mode = self.deterministic_mode
+        # create core simulation engine
+        self.sim = Simulation(
+            formula_list=self.formula_list,
+            temperature=self.temperature,
+            deterministic_mode=self.deterministic_mode,
+            seed=self.seed,
+            kb=self.kb
+        )
 
         # optional per-frame exporter path (set via start_frame_export)
         self._frame_export_path: Optional[str] = None
 
         # visualization handles (kept minimal here)
         self.fig = None
-        self.ax = None
+        self.main_ax = None
 
         # event log for end-of-run export (keeps references to KB events)
         self.event_log: List[Dict[str, Any]] = []
-        # per-frame metrics for visualization / ML
+
+    @property
+    def fig(self):
+        """Delegate fig to internal simulation"""
+        return self.sim.fig if hasattr(self.sim, 'fig') else None
+
+    @fig.setter
+    def fig(self, value):
+        """Set fig on internal simulation"""
+        self.sim.fig = value
+
+    @property
+    def main_ax(self):
+        """Delegate main_ax to internal simulation"""
+        return self.sim.main_ax if hasattr(self.sim, 'main_ax') else None
+
+    @main_ax.setter
+    def main_ax(self, value):
+        """Set main_ax on internal simulation"""
+        self.sim.main_ax = value
+        # energy metrics for stable visualization
+        self.energy_metrics = EnergyMetrics(max_history=1000, smoothing_window=5)
+        # legacy energy history for backward compatibility
         self.energy_history: List[float] = []
         self.training_loss_history: List[float] = []
+        # optional trainer callback: function(sim) -> Optional[float]
+        self.loss_callback: Optional[Callable[["SimulationManager"], Optional[float]]] = None
 
-        logger.info(f"SimulationManager initialized: atoms={len(self.atoms)} bonds={len(self.bonds)}")
+        logger.info(f"SimulationManager initialized: atoms={len(self.sim.atoms)} bonds={len(self.sim.bonds)}")
 
     # -----------------------
-    # Construction helpers
+    # Properties delegating to simulation
     # -----------------------
-    def _build_atoms_from_formulas(self, formula_list: List[Dict[str, int]]) -> None:
-        """
-        Create Atom objects given a list of formula dictionaries.
-        Atoms are placed randomly within a central region to avoid initial overlap.
-        """
-        self.atoms = []
-        uid_counter = 0
-        for midx, fdict in enumerate(formula_list):
-            # choose a cluster center away from edges for nicer visuals
-            center = np.clip(np.random.rand(2) * 0.5 + 0.25, 0.15, 0.85)
-            for sym, cnt in fdict.items():
-                for i in range(max(1, int(cnt))):
-                    uid = f"m{midx}_a{uid_counter}"
-                    # small scatter around the center proportional to covalent radius
-                    # use element covalent radius to avoid overlaps
-                    try:
-                        from engine.elements_data import get_element
-                        r = float(get_element(sym).get('covalent_radius', 0.7))
-                    except Exception:
-                        r = 0.7
-                    dist_scale = max(0.005, r * 0.08)
-                    pos = center + np.random.normal(scale=dist_scale, size=2)
-                    pos = np.clip(pos, 0.05, 0.95)
-                    # small thermal velocity based on mass / temperature
-                    try:
-                        import numpy as _np
-                        vel = _np.random.normal(scale=0.005, size=2)
-                    except Exception:
-                        vel = np.zeros(2)
-                    atom = Atom(symbol=sym, pos=pos, vel=vel, uid=uid)
-                    self.atoms.append(atom)
-                    uid_counter += 1
-        # ensure physics engine (if present) references new atoms
-        try:
-            if hasattr(self, "physics") and self.physics is not None:
-                self.physics.atoms = self.atoms
-        except Exception:
-            pass
+    @property
+    def atoms(self) -> List[Atom]:
+        return self.sim.atoms
+
+    @property
+    def bonds(self) -> List[BondObj]:
+        return self.sim.bonds
+
+    @property
+    def physics(self):
+        return self.sim.physics
 
     # -----------------------
     # Core stepping
@@ -352,33 +209,52 @@ class SimulationManager:
     def step(self) -> None:
         """
         Perform a single simulation tick:
-         - advance physics
-         - perform reaction engine step (bond formation & breakage)
+         - delegate to core simulation step
          - record atom history
          - optionally export / snapshot KB at intervals
         """
         try:
-            # advance physics
-            self.physics.step()
+            # delegate core stepping to simulation engine
+            self.sim.step()
 
-            # Reaction engine uses physics.spatial for neighbors
-            self.reaction_engine.step(self.frame)
-
-            # history recording for visualization / export
-            for a in self.atoms:
-                a.record(self.frame)
-
-            # energy diagnostics for visualization/ML
+            # energy diagnostics for visualization/ML (approximate estimates)
             try:
-                e = float(self.physics.total_energy().get('total', 0.0))
-            except Exception:
+                # Update comprehensive energy metrics
+                self.energy_metrics.update(
+                    self.sim.physics,
+                    len(self.sim.atoms),
+                    len(self.sim.bonds)
+                )
+                # Keep legacy total energy for backward compatibility
+                e = float(self.sim.physics.total_energy().get('total', 0.0))
+                self.energy_history.append(e)
+            except Exception as e:
+                logger.exception(f"Error updating energy metrics: {e}")
                 e = 0.0
-            self.energy_history.append(e)
+                self.energy_history.append(e)
 
-            # training loss placeholder: if ML trainer present, it can push values here
-            if not self.training_loss_history:
-                # seed with None or 0-length. downstream code can detect empty list.
-                pass
+            # energy conservation validation (approximate due to thermostat)
+            try:
+                drift = (e - self.sim.initial_energy) / abs(self.sim.initial_energy) if self.sim.initial_energy != 0 else 0.0
+                self.sim.energy_drift_history.append(drift)
+                self.sim.max_energy_drift = max(self.sim.max_energy_drift, abs(drift))
+                if abs(drift) > 0.1:
+                    logger.warning(f"Timestep stability warning: energy drift {abs(drift):.6f} exceeds threshold 0.1")
+            except Exception:
+                logger.exception("Error computing energy drift")
+
+            # training loss callback: allow external trainers to push per-step loss values
+            try:
+                if self.loss_callback is not None:
+                    val = self.loss_callback(self)
+                    if val is not None:
+                        try:
+                            self.training_loss_history.append(float(val))
+                        except Exception:
+                            # ignore non-numeric returns
+                            pass
+            except Exception:
+                logger.exception("Error running loss_callback")
 
             self.frame += 1
 
@@ -415,6 +291,32 @@ class SimulationManager:
                 except Exception:
                     logger.exception("update_callback failed during run_steps.")
 
+        # log energy conservation summary
+        logger.info(f"Run completed: max energy drift = {self.sim.max_energy_drift:.6f}")
+
+    # -----------------------
+    # Trainer callback API
+    # -----------------------
+    def register_loss_callback(self, cb: Optional[Callable[["SimulationManager"], Optional[float]]]) -> None:
+        """Register a loss callback. The callback receives the SimulationManager and
+        can return a numeric loss value (or None). Returned values are appended to
+        `self.training_loss_history` when provided."""
+        if cb is None:
+            self.loss_callback = None
+        else:
+            self.loss_callback = cb
+
+    def push_training_loss(self, value: float) -> None:
+        """Append a training loss value into the history (thread-safe enough for simple use)."""
+        try:
+            self.training_loss_history.append(float(value))
+        except Exception:
+            logger.exception("Failed to push training loss value")
+
+    def clear_training_loss_history(self) -> None:
+        """Clear stored training loss history."""
+        self.training_loss_history = []
+
     # -----------------------
     # Background threaded run support
     # -----------------------
@@ -447,6 +349,35 @@ class SimulationManager:
             self._thread.join(timeout=1.0)
             self._thread = None
         logger.info("Simulation background thread stopped.")
+
+    # -----------------------
+    # System properties
+    # -----------------------
+    def get_net_charge(self) -> float:
+        """
+        Calculate the net charge of the system.
+
+        Returns:
+            float: Sum of all atom charges
+        """
+        return sum(getattr(atom, 'charge', 0.0) for atom in self.atoms)
+
+    def get_charge_distribution(self) -> Dict[str, float]:
+        """
+        Get charge distribution statistics.
+
+        Returns:
+            Dict[str, float]: Dictionary with charge statistics
+        """
+        charges = [getattr(atom, 'charge', 0.0) for atom in self.atoms]
+        return {
+            'net_charge': sum(charges),
+            'positive_atoms': sum(1 for c in charges if c > 0.1),
+            'negative_atoms': sum(1 for c in charges if c < -0.1),
+            'neutral_atoms': sum(1 for c in charges if abs(c) <= 0.1),
+            'max_positive': max(charges) if charges else 0.0,
+            'max_negative': min(charges) if charges else 0.0,
+        }
 
     # -----------------------
     # Utility & exports

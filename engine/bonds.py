@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 # -----------------------
 # Bond constants
 # -----------------------
-DEFAULT_BOND_SPRING = 500.0  # arbitrary units
+DEFAULT_BOND_SPRING = 5.0  # reduced for stability
 BOND_BREAK_FORCE = 150.0     # arbitrary units
 BOND_BREAK_DISTANCE_FACTOR = 1.5  # fraction of rest length
 
@@ -52,6 +52,30 @@ class BondObj:
         atom2.add_bond(self)
 
         logger.debug(f"Created Bond: {atom1.uid}-{atom2.uid} order={self.order} rest_length={self.rest_length:.3f}")
+
+    def get_bond_type(self) -> str:
+        """
+        Determine if bond is ionic or covalent based on electronegativity difference and charges.
+
+        Returns:
+            str: "ionic", "covalent", or "polar_covalent"
+        """
+        en1 = getattr(self.atom1, "en", 0.0)
+        en2 = getattr(self.atom2, "en", 0.0)
+        charge1 = getattr(self.atom1, "charge", 0.0)
+        charge2 = getattr(self.atom2, "charge", 0.0)
+
+        en_diff = abs(en1 - en2)
+
+        # Ionic bonds: large electronegativity difference (>1.7) or opposite charges
+        if en_diff > 1.7 or (charge1 * charge2 < -0.5):
+            return "ionic"
+        # Polar covalent: moderate difference (0.5-1.7)
+        elif en_diff > 0.5:
+            return "polar_covalent"
+        # Covalent: small difference
+        else:
+            return "covalent"
 
     def estimate_rest_length(self) -> float:
         """
@@ -148,6 +172,7 @@ class BondObj:
 def can_form_bond(atom1, atom2, temperature: float = 300.0) -> Tuple[bool, float]:
     """
     Heuristic: decide if two atoms can form a bond, returns (can_form, score)
+    Considers both covalent (electronegativity) and ionic (charge) bonding.
     """
     from engine import atoms
 
@@ -157,9 +182,20 @@ def can_form_bond(atom1, atom2, temperature: float = 300.0) -> Tuple[bool, float
     if dist > max_dist:
         return False, 0.0
 
-    bond_energy = (1.0 / (1.0 + abs(atom1.en - atom2.en))) * 1.0
+    # Covalent bonding score (electronegativity difference)
+    en_diff = abs(atom1.en - atom2.en)
+    covalent_score = 1.0 / (1.0 + en_diff)
+
+    # Ionic bonding score (opposite charges attract)
+    charge1 = getattr(atom1, 'charge', 0.0)
+    charge2 = getattr(atom2, 'charge', 0.0)
+    ionic_score = max(0.0, -charge1 * charge2)  # positive when opposite charges
+
+    # Combined bonding score
+    total_score = covalent_score + ionic_score
+
     kT_red = max(0.001, temperature / 300.0)
-    prob = 1.0 - math.exp(-bond_energy / (kT_red + 1e-12))
+    prob = 1.0 - math.exp(-total_score / (kT_red + 1e-12))
     prob = float(max(0.0, min(1.0, prob)))
     return (prob > 0.15), prob
 
@@ -168,17 +204,17 @@ def sanitize_bonds(bonds: list, atoms_list: list):
     Ensure no atom exceeds its allowed max bonds.
     """
     from engine import atoms
+    from engine.elements_data import get_element
 
-    max_valence = {
-        "H": 1, "C": 4, "N": 3, "O": 2, "F": 1, "Cl": 1, "Br": 1, "I": 1
-    }
     neigh_count = {}
     for b in bonds:
         neigh_count[b.atom1.uid] = neigh_count.get(b.atom1.uid, 0) + 1
         neigh_count[b.atom2.uid] = neigh_count.get(b.atom2.uid, 0) + 1
     for b in list(bonds):
-        max1 = max_valence.get(b.atom1.symbol, 8)
-        max2 = max_valence.get(b.atom2.symbol, 8)
+        element1 = get_element(b.atom1.symbol)
+        element2 = get_element(b.atom2.symbol)
+        max1 = element1.get('max_bonds', 8)
+        max2 = element2.get('max_bonds', 8)
         if neigh_count.get(b.atom1.uid, 0) > max1 or neigh_count.get(b.atom2.uid, 0) > max2:
             try:
                 bonds.remove(b)

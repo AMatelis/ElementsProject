@@ -34,7 +34,8 @@ plt.rcParams['lines.linewidth'] = 1.5
 
 # Engine imports
 from engine.simulation_manager import SimulationManager
-from engine.elements_data import ELEMENT_DATA, load_elements
+from engine.elements_data import ELEMENT_DATA, load_elements, get_element
+from engine.atoms import Atom
 from engine.formula_parser import parse_formula
 from engine.products import graph_to_formula
 
@@ -47,6 +48,7 @@ from visual.export_tools import (
     export_simulation_to_mp4,
     ensure_dir,
     now_str,
+    save_sidepanel_png,
 )
 
 
@@ -273,6 +275,17 @@ class SimulationGUIAdvanced(tk.Tk):
             relief=tk.FLAT, bd=0, selectmode=tk.SINGLE, height=6
         )
         self.product_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        # Element palette (quick insert)
+        palette_frame = tk.Frame(right, bg=THEME['panel'], relief=tk.SUNKEN, bd=1)
+        palette_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 8))
+        tk.Label(palette_frame, text="ELEMENT PALETTE", bg=THEME['panel'], fg=THEME['accent'],
+            font=("Courier", 9, "bold")).pack(anchor=tk.W, padx=8, pady=4)
+
+        self.element_listbox = tk.Listbox(palette_frame, bg=THEME['border'], fg=THEME['fg'], font=("Courier", 8), height=6)
+        self.element_listbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        insert_btn = self._make_button(palette_frame, "Insert", self._insert_selected_element, THEME['accent'], side=tk.LEFT, width=10)
+        self._populate_element_palette()
         
         # Right-bottom: Metrics
         metrics_frame = tk.Frame(right, bg=THEME['panel'], relief=tk.SUNKEN, bd=1)
@@ -293,6 +306,8 @@ class SimulationGUIAdvanced(tk.Tk):
         
         for label, cmd in [("HTML", self._export_html), ("GIF", self._export_gif), ("MP4", self._export_mp4)]:
             self._make_button(export_frame, label, cmd, THEME['accent'], side=tk.LEFT, width=8)
+        # Side-panel PNG export (publication-ready)
+        self._make_button(export_frame, "SidePNG", self._export_sidepanel, THEME['accent_dark'], side=tk.LEFT, width=10)
 
     def _make_button(self, parent, text, cmd, color, side=tk.LEFT, width=None, state=tk.NORMAL):
         """Create themed button"""
@@ -505,6 +520,79 @@ Deterministic: {'✓' if self.sim.deterministic_mode else '✗'}
                 messagebox.showinfo("Export", f"Saved: {os.path.basename(fname)}")
             except Exception as e:
                 messagebox.showerror("Export Error", str(e))
+
+    def _export_sidepanel(self):
+        """Export the right-side time-series panel as a PNG."""
+        if not self.sim:
+            messagebox.showwarning("No Sim", "Run simulation first")
+            return
+        fname = filedialog.asksaveasfilename(defaultext=".png", filetypes=[("PNG", "*.png"), ("All", "*.*")])
+        if not fname:
+            return
+        try:
+            save_sidepanel_png(self.sim, fname)
+            messagebox.showinfo("Export", f"Saved: {os.path.basename(fname)}")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
+
+    # -----------------------
+    # Element palette helpers
+    # -----------------------
+    def _populate_element_palette(self):
+        """Populate the element palette listbox with symbol — name."""
+        try:
+            self.element_listbox.delete(0, tk.END)
+            # sort by atomic number if present
+            items = list(ELEMENT_DATA.items())
+            try:
+                items.sort(key=lambda kv: int(kv[1].get('atomic_number', 9999)))
+            except Exception:
+                items.sort()
+            for sym, data in items:
+                name = data.get('name', '')
+                self.element_listbox.insert(tk.END, f"{sym} — {name}")
+        except Exception:
+            logger.exception("Failed to populate element palette")
+
+    def _insert_selected_element(self):
+        sel = self.element_listbox.curselection()
+        if not sel:
+            messagebox.showwarning("Select Element", "Choose an element to insert")
+            return
+        text = self.element_listbox.get(sel[0])
+        sym = text.split(' — ')[0].strip()
+        self._insert_element(sym)
+
+    def _insert_element(self, symbol: str, pos: Optional[Tuple[float, float]] = None):
+        """Insert an atom of `symbol` into the running simulation at `pos` (center by default)."""
+        if not self.sim:
+            messagebox.showwarning("No Sim", "Start a simulation before inserting atoms")
+            return
+        try:
+            if pos is None:
+                pos = np.array([0.5, 0.5])
+            else:
+                pos = np.array(pos)
+            # create atom with element-informed properties
+            uid = f"user_{self.sim.frame}_{len(self.sim.atoms)}"
+            atom = Atom(symbol=symbol, pos=pos, vel=np.zeros(2), uid=uid)
+            # add to simulation and physics structures
+            self.sim.atoms.append(atom)
+            try:
+                self.sim.physics.add_atom(atom)
+            except Exception:
+                # fallback: rebuild spatial structure
+                try:
+                    self.sim.physics.rebuild_spatial()
+                except Exception:
+                    pass
+            # render immediately
+            render_simulation_frame(self.sim)
+            if self.canvas and self.sim.fig:
+                self.canvas.figure = self.sim.fig
+                self.canvas.draw_idle()
+        except Exception as e:
+            logger.exception(f"Failed to insert element {symbol}: {e}")
 
     def start(self):
         """Start the GUI"""

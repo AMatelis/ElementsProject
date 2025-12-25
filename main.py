@@ -122,12 +122,12 @@ def run_simulation_cli():
 
 def launch_gui():
     """
-    Launch GUI mode using SimulationGUIAdvanced.
+    Launch GUI mode using PublicationGUI.
     """
     try:
-        from gui.simulation_gui_advanced import SimulationGUIAdvanced
-        gui = SimulationGUIAdvanced(title="Molecular Reaction Simulation - Advanced")
-        gui.start()  # This calls mainloop()
+        from gui.publication_gui import PublicationGUI
+        gui = PublicationGUI(title="Molecular Dynamics Simulation")
+        gui.mainloop()
     except Exception as e:
         print(f"[ERROR] GUI launch failed: {e}")  
         import traceback
